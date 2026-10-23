@@ -1,110 +1,100 @@
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env"), quiet: true });
 const express = require("express");
-const mongoose=require("mongoose");
+const mongoose = require("mongoose");
+
 const requestRouter = express.Router();
-require("dotenv").config();
-const { User } = require("../models/user")
-const { userAuth } = require("../middlewares/authmiddlewares")
-const app = express();
-const { validateSignup } = require("../utils/validation");
-const bcrypt = require("bcryptjs");
-const cookieParser = require("cookie-parser");
-const jwt = require("jsonwebtoken");
-const { connectionRequestModel } = require("../models/connectionrequest")
-app.use(express.json());
-app.use(cookieParser());
+const { User } = require("../models/user");
+const { userAuth } = require("../middlewares/authmiddlewares");
+const { connectionRequestModel } = require("../models/connectionrequest");
+
+const SEND_ALLOWED_STATUS = ["interested", "ignore"];
+const REVIEW_ALLOWED_STATUS = ["accepted", "rejected"];
 
 requestRouter.post("/request/send/:status/:toUserId", userAuth, async (req, res) => {
   try {
-    const fromUserid = req.user._id;
-    const toUserid = req.params.toUserId
-    const status = req.params.status;
+    const fromUserId = req.user._id;
+    const { toUserId, status } = req.params;
 
-   
+    if (!SEND_ALLOWED_STATUS.includes(status)) {
+      return res.status(400).json({ message: `Invalid connection request status: ${status}` });
+    }
 
+    if (!mongoose.Types.ObjectId.isValid(toUserId)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
 
-    if (!fromUserid || !toUserid || !status) throw new Error("Something Went wrong on sending Connection Request")
+    if (fromUserId.equals(toUserId)) {
+      return res.status(400).json({ message: "You cannot send a request to yourself" });
+    }
 
-    //check is the toUserId is present or not;
-    const isToUserPresent = await User.findById(toUserid);
+    const toUser = await User.findById(toUserId).select("firstName");
+    if (!toUser) {
+      return res.status(404).json({ message: "The user you are trying to connect with does not exist" });
+    }
 
-
-    if (!isToUserPresent) throw new Error("Something Went Wrong During sending Request");
-
-   
-
-    const ALLOWEDSTATUS = ['interested', 'ignore'];
-
-    if (!ALLOWEDSTATUS.includes(status)) throw new Error({
-      message: `Bad Connection Request ${status}`
-    })
-
-
-
-    //check is user is already Present 
     const existingConnection = await connectionRequestModel.findOne({
       $or: [
-        { fromUserid: fromUserid, toUserid: toUserid },
-        { fromUserid: toUserid, toUserid: fromUserid }
-      ]
+        { fromUserid: fromUserId, toUserid: toUserId },
+        { fromUserid: toUserId, toUserid: fromUserId },
+      ],
     });
 
-
-
-
-    if (existingConnection) throw new Error("connectionm Request Already Present");
-
-    const connectionRequest = new connectionRequestModel({
-      fromUserid: fromUserid,
-      toUserid: toUserid,
-      status: status
-    })
-
-    const data = await connectionRequest.save()
-
-    res.status(200).send({ message: `${req.user.firstName} is ` + " " + status === "intrested" ? "Intrested in You " : "Ignored You", data: data })
-
-  }
-  catch (error) {
-    res.status(400).send({ message: error.message })
-  }
-})
-requestRouter.post(
-  "/request/review/:status/:requestId",
-  userAuth,
-  async (req, res) => {
-    try {
-      const user = req.user;
-      const fromUserId = req.params.requestId;
-      const toUserId = user._id;
-      const status = req.params.status;
-
-      const ALLOWEDSTATUS = ["accepted", "rejected"];
-      if (!ALLOWEDSTATUS.includes(status)) {
-        throw new Error("Status not allowed");
-      }
-
-
-
-      const connectionRequest = await connectionRequestModel.findOne({
-        fromUserid: new mongoose.Types.ObjectId(fromUserId),
-        toUserid: new mongoose.Types.ObjectId(toUserId),
-        status: "interested",
-      });
-
-      if (!connectionRequest) {
-        throw new Error("Connection request not found");
-      }
-
-      connectionRequest.status = status;
-      await connectionRequest.save();
-
-      res.status(200).send({
-        message: `${user.firstName} ${status} your request`,
-      });
-    } catch (error) {
-      res.status(400).send({ message: error.message });
+    if (existingConnection) {
+      return res.status(409).json({ message: "A connection request already exists with this user" });
     }
-  }
-);
 
-module.exports = { requestRouter }
+    const connectionRequest = await connectionRequestModel.create({
+      fromUserid: fromUserId,
+      toUserid: toUserId,
+      status,
+    });
+
+    const message =
+      status === "interested"
+        ? `You sent a connection request to ${toUser.firstName}`
+        : `You ignored ${toUser.firstName}`;
+
+    return res.status(200).json({ message, data: connectionRequest });
+  } catch (error) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+requestRouter.post("/request/review/:status/:requestId", userAuth, async (req, res) => {
+  try {
+    const { requestId, status } = req.params;
+
+    if (!REVIEW_ALLOWED_STATUS.includes(status)) {
+      return res.status(400).json({ message: `Invalid review status: ${status}` });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(requestId)) {
+      return res.status(400).json({ message: "Invalid request id" });
+    }
+
+    const connectionRequest = await connectionRequestModel
+      .findOne({
+        _id: requestId,
+        toUserid: req.user._id,
+        status: "interested",
+      })
+      .populate("fromUserid", "firstName");
+
+    if (!connectionRequest) {
+      return res.status(404).json({ message: "Connection request not found" });
+    }
+
+    connectionRequest.status = status;
+    await connectionRequest.save();
+
+    return res.status(200).json({
+      message: `You ${status} the connection request from ${connectionRequest.fromUserid?.firstName || "the developer"}`,
+      data: connectionRequest,
+    });
+  } catch (error) {
+    return res.status(400).json({ message: error.message });
+  }
+});
+
+module.exports = { requestRouter };
